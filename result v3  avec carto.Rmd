@@ -1,0 +1,467 @@
+---
+title: "Resultat"
+author: "RUMIANOWSKI 0."
+date: "18/06/2022"
+output:
+  pdf_document: null
+encoding: "UTF-8"
+---
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+#----------- Module 09 -- Multiple animals ------------X
+
+
+rm(list = ls())
+
+# Load packages ----
+library(tidyverse)
+library(mvtnorm)
+library(amt)
+library(purrr)
+library(lubridate)
+library(sf)
+library(terra)
+library(glmmTMB)
+library(broom)
+library(readxl)
+library(kableExtra)
+
+# 1. Load data ----
+
+bordereau <- read_excel("data/bordereau.xlsx")
+
+# GPS data 
+dagami_42 = read.csv('data/X42.csv',sep=';', dec = ",") %>% 
+  mutate( id = "42")
+dagami_43 =read.csv('data/X43.csv',sep=';', dec = ",") %>% 
+  mutate( id = "43")
+dagami_44 =read.csv('data/X44.csv',sep=';', dec = ",") %>% 
+  mutate( id = "44")
+dagami_45 =read.csv('data/X45.csv',sep=';', dec = ",") %>% 
+  mutate( id = "45")
+dagami_46 =read.csv('data/X46.csv',sep=';', dec = ",") %>% 
+  mutate( id = "46")
+dagami_47 =read.csv('data/X47.csv',sep=';', dec = ",") %>% 
+  mutate( id = "47")
+dagami_48 =read.csv('data/X48.csv',sep=';', dec = ",") %>% 
+  mutate( id = "48")
+dagami_50 =read.csv('data/X50.csv',sep=';', dec = ",") %>% 
+  mutate( id = "50")
+dagami_52 =read.csv('data/X52.csv',sep=';', dec = ",") %>% 
+  mutate( id = "52")
+dagami_53 =read.csv('data/X53.csv',sep=';', dec = ",") %>% 
+  mutate( id = "53")
+
+dagami = rbind(dagami_42, 
+               dagami_43, 
+               dagami_44, 
+               dagami_45, 
+               dagami_46, 
+               dagami_47, 
+               dagami_48, 
+               dagami_50, 
+               dagami_52,
+               dagami_53) %>% 
+  subset(., Date != "10/05/2023") # journee des tests de predeploiement avec Argos
+
+
+colony <- tibble(
+  Longitude = -52.158637, 
+  Latitude  = 4.644658 )%>% 
+  st_as_sf(.,coords = c("Longitude","Latitude"), crs = 4326) %>% 
+  st_transform(., crs = 2971)
+
+colony_radius = 1000 # units: meters
+
+dagami  = dagami %>% 
+  mutate(ts = dmy_hms(paste(dagami$Date, dagami$Time))) %>% 
+  mutate(ts = ts - hms("03:00:00")) %>% 
+  rename(x_ = Longitude, y_ = Latitude) %>% 
+  subset(., CRC == "OK") %>% 
+  dplyr::select(id, x_, y_, ts, Fix) %>% 
+  st_as_sf(.,coords = c("x_","y_"), crs = 4326) %>% 
+  st_transform(., crs = 2971) %>% #
+  mutate(x_ = st_coordinates(.)[, "X"],
+         y_ = st_coordinates(.)[, "Y"]) %>%
+  st_drop_geometry()
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, include = FALSE}
+# Habitat data 
+
+habitat = st_read("habitat/Habitats_forestiers_2015_clean.shp") 
+
+habitat = habitat %>% 
+  dplyr::select(grid_code) %>% 
+  mutate(grid_code = as.character(grid_code)) %>% 
+  mutate(grid_code = fct_collapse(grid_code,
+                                   Mangroves = c("41120"),
+                                   Marais_interieur = c("0"),
+                                   Forets_inondables = c("41110", "41111","41210"), 
+                                   Forets_terre_ferme = c("41610"))) %>% 
+  subset(., grid_code == "Marais_interieur" |
+           grid_code == "Forets_inondables")
+
+cycle_hire_osm_projected = st_transform(habitat, "EPSG:2971")
+raster_template = rast(ext(cycle_hire_osm_projected), resolution = 100,
+                       crs = st_crs(cycle_hire_osm_projected)$wkt)
+
+hab = rasterize(cycle_hire_osm_projected, raster_template, field = "grid_code",
+                fun = "max")
+
+
+#writeRaster(hab, filename=file.path("hab_rasterize.tif"), overwrite=TRUE)
+#rast("hab_rasterize.tif")
+
+names(hab) = c("sol_onf")
+
+
+# iSSF --------------------------------------------------------------------
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+trk <- dagami %>% 
+  make_track(x_, y_, ts,
+             id = id, Fix = Fix,
+             crs = 2971) %>% 
+  tracked_from_to(from = as.POSIXct("2023-05-19 20:00"),
+                  to = as.POSIXct("2024-10-01 08:00"))
+
+
+dat1 <- trk %>% nest(data = -id)
+dat2 <- dat1 %>% 
+  mutate(dat.resample = map(data, ~ track_resample(., rate = minutes(60), 
+                                                   tolerance = minutes(10))))%>% 
+  mutate(ssf = map(dat.resample, ~ .x %>% steps_by_burst() %>% 
+                     random_steps(n_control = 50) %>% 
+                     extract_covariates(hab$sol_onf))) %>% 
+  select(ssf, id) %>% unnest(cols = ssf) %>% 
+  mutate(log_sl_ = log(sl_), sin_ta_ = sin(ta_),
+         step_id1_ = paste(id, step_id_, sep = "."))%>% 
+  filter(sl_ > 0) %>% 
+  mutate(log_sl_ = log(sl_), sin_ta_ = sin(ta_)) %>% 
+  na.omit(., cols=c("x2_","y2_")) %>% 
+  st_as_sf(.,coords = c("x2_","y2_"), crs = 2971) %>% 
+  mutate(dist_colony = st_distance(., colony) %>% 
+           as.numeric())%>% 
+  mutate(x1_ = st_coordinates(.)[, "X"],
+         y1_ = st_coordinates(.)[, "Y"]) %>% 
+  st_drop_geometry() %>% 
+  subset(dist_colony > colony_radius) %>%
+  subset(dist_colony < Inf) %>%
+  mutate(log_sl_ = log(sl_), sin_ta_ = sin(ta_),
+         step_id1_ = paste(id, step_id_, sep = ".")) 
+
+trk = dat2 %>% 
+  na.omit()
+
+trk$day_night = trk$t1_ %>% 
+  hour() %>% 
+  cut(.,
+      breaks=c(-0.1, 6, 19, 24),
+      labels=c('Night', 'Day','Night'))
+
+trk_day = trk %>% 
+  subset(., day_night == "Day")
+
+trk_night = trk %>% 
+  subset(., day_night == "Night")
+
+trk = trk_night
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# iSSF for each individuals -----------------------------------------------
+
+trk <- within(trk, sol_onf <- relevel(sol_onf, ref = "Marais_interieur"))
+
+
+df = tibble()
+
+for (cind in unique(trk$id)){
+  
+  m = trk %>% 
+    subset(id == cind) %>% 
+    fit_issf(., case_ ~ sol_onf  +  strata(step_id_), model = TRUE) 
+  
+  n = m$model %>% summary() 
+  p = n$coefficients %>% 
+    data.frame()%>% 
+    mutate(id = cind)
+  
+  df = rbind(df, p)
+}
+
+
+
+df2 = cbind(df[,6], df[, 1:5] %>% round(digits = 2))
+
+colnames(df2) = c("ID No.", "coef", "exp(coef)", "se(coef)", "z", "Pr(>|z|)")
+
+df2 = df2 %>% tibble()
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+df2 %>% 
+  kbl(., booktabs = T, caption = "Coefficients of relative selection strength (logarithm) for floodplain forest compared to inland marsh (reference category) calculated from fitted integrated step‐selection. Steps staying in and leading to the colony were excluded from the analysis") %>%
+  kable_paper(latex_options = c("striped", "hold_position"), full_width = F)%>%
+  row_spec(4:6, bold = T) 
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# graphique ---------------------------------------------------------------
+
+
+# Levels of land use
+lu_levs <- levels(trk$sol_onf)
+
+# x1
+x1_lu <- data.frame(sol_onf = factor(lu_levs, levels = lu_levs))
+# x2
+x2_lu <- data.frame(sol_onf = factor("Marais_interieur", levels = lu_levs))
+
+
+df_graphe =  tibble()
+
+for (cind in unique(trk$id)){
+  
+  m = trk %>% 
+    subset(., id == cind) %>% 
+    fit_issf(., case_ ~ sol_onf  +  strata(step_id_), model = TRUE) %>% 
+    log_rss(., x1_lu, x2_lu, ci = "se") 
+  r = m$df %>% 
+    mutate(id = as.factor(cind))
+  
+  df_graphe = rbind(df_graphe, r)
+}
+
+
+
+res = df_graphe
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+res2 = merge(res, bordereau, by = c("id")) %>% 
+  dplyr::select(id, SEXE, sol_onf_x1, log_rss, lwr, upr)
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# Plot --------------------------------------------------------------------
+
+
+
+levels(res2$sol_onf_x1) = c("Inland marsh", "Floodplain forest ")
+
+res2 = res2 %>% 
+  rename(`ID No.` = id) %>%
+  rename(Sex = SEXE) %>% 
+  subset(`ID No.` != "42") %>% 
+  subset(`ID No.` != "53")
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+p = res2 |> 
+  ggplot(aes(y = sol_onf_x1 , x = log_rss,
+             group = `ID No.`, col = `ID No.`, las=2, shape = Sex)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_pointrange(aes(xmin = lwr, xmax = upr),
+                  position = position_dodge(width = 0.7), size = 0.5) +
+  ylab("Habitat") +
+  xlab("Relative Selection Strength") +
+  coord_cartesian(xlim = c(-1, 4.5)) +
+  theme_bw()
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, , fig.cap = "Point estimates with 95% confidence intervals for the relative selection strength for different habitat classes (inland marsh as the reference category). Different colors indicate the id of the animals and symbols the sex (squares for male, triangles for females and circles for undetermined). The dashed horizontal line indicates no preference relative to inland marsh (the reference category)."}
+p
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+rm(list = ls())
+
+
+#----------- Module 03 -- Home Range ------------X
+
+
+# Load packages ----
+library(tidyverse)
+library(mvtnorm)
+library(amt)
+library(purrr)
+library(lubridate)
+library(sf)
+library(terra)
+library(glmmTMB)
+library(broom)
+library(tidyverse)
+library(raster)    
+library(here)    
+library(prismatic)
+library(ggmap)
+library(ggsn)
+library(readxl)
+
+
+# 1. Load data ----
+
+
+bordereau <- read_excel("data/bordereau.xlsx")
+
+dagami_42 = read.csv('data/X42.csv',sep=';', dec = ",") %>% 
+  mutate( id = "42")
+dagami_43 =read.csv('data/X43.csv',sep=';', dec = ",") %>% 
+  mutate( id = "43")
+dagami_44 =read.csv('data/X44.csv',sep=';', dec = ",") %>% 
+  mutate( id = "44")
+dagami_45 =read.csv('data/X45.csv',sep=';', dec = ",") %>% 
+  mutate( id = "45")
+dagami_46 =read.csv('data/X46.csv',sep=';', dec = ",") %>% 
+  mutate( id = "46")
+dagami_47 =read.csv('data/X47.csv',sep=';', dec = ",") %>% 
+  mutate( id = "47")
+dagami_48 =read.csv('data/X48.csv',sep=';', dec = ",") %>% 
+  mutate( id = "48")
+dagami_50 =read.csv('data/X50.csv',sep=';', dec = ",") %>% 
+  mutate( id = "50")
+dagami_52 =read.csv('data/X52.csv',sep=';', dec = ",") %>% 
+  mutate( id = "52")
+dagami_53 =read.csv('data/X53.csv',sep=';', dec = ",") %>% 
+  mutate( id = "53")
+
+dagami = rbind(dagami_42, 
+               dagami_43, 
+               dagami_44, 
+               dagami_45, 
+               dagami_46, 
+               dagami_47, 
+               dagami_48, 
+               dagami_50, 
+               dagami_52,
+               dagami_53) %>% 
+  subset(., Date != "10/05/2023") # pre deployment test day
+
+colony <- tibble(
+  Longitude = -52.158637, 
+  Latitude  = 4.644658 )%>% 
+  st_as_sf(.,coords = c("Longitude","Latitude"), crs = 4326) %>% 
+  st_transform(., crs = 2971)
+
+colony_radius = 1000 # unit: m
+
+dagami  = dagami %>% 
+  mutate(ts = dmy_hms(paste(dagami$Date, dagami$Time))) %>% 
+  mutate(ts = ts - hms("03:00:00")) %>% 
+  rename(x_ = Longitude, y_ = Latitude) %>% 
+  subset(., CRC == "OK") %>% 
+  dplyr::select(id, x_, y_, ts, Fix) %>% 
+  st_as_sf(.,coords = c("x_","y_"), crs = 4326) %>% 
+  st_transform(., crs = 2971) %>% 
+  mutate(dist_colony = st_distance(., colony))%>% 
+  mutate(x_ = st_coordinates(.)[, "X"],
+         y_ = st_coordinates(.)[, "Y"]) %>%
+  st_drop_geometry() 
+
+dagami2  = dagami %>% 
+  mutate(dist_colony = as.numeric(dist_colony)) 
+
+
+#   -----------------------------------------------------------------------
+
+
+trk <- dagami2 %>% 
+  make_track(x_, y_, ts,
+             id = id, Fix = Fix,
+             dist_colony = dist_colony,
+             crs = 2971) %>% 
+  tracked_from_to(from = as.POSIXct("2023-05-19 20:00"),
+                  to = as.POSIXct("2024-10-01 08:00"))
+
+
+
+# fond satellite ----------------------------------------------------------
+
+df = read.csv('data/sat_colony_all.csv',sep=',', dec = ".") 
+
+x_max = 428000
+x_min = 357000
+
+y_max = 530000
+y_min = 468000
+
+
+df_zoom = df %>% 
+  subset(., x < x_max)%>% 
+  subset(., x > x_min)%>% 
+  subset(., y < y_max)%>% 
+  subset(., y > y_min)
+
+# production carte --------------------------------------------------------
+
+# KDE ---------------------------------------------------------------------
+
+m <- trk %>% nest(data = -id) %>% 
+  mutate(kdes = map(data,  function(x) {hr_isopleths(hr_kde(x, levels = c(0.95)))})) %>% 
+  dplyr::select(kdes, id)
+
+
+
+iso_all = 
+  rbind(
+      subset(m, id == 42)$kdes[[1]] %>% mutate(id = 42),
+      subset(m, id == 43)$kdes[[1]] %>% mutate(id = 43),
+      subset(m, id == 44)$kdes[[1]] %>% mutate(id = 44),
+      subset(m, id == 45)$kdes[[1]] %>% mutate(id = 45),
+      subset(m, id == 46)$kdes[[1]] %>% mutate(id = 46),
+      subset(m, id == 47)$kdes[[1]] %>% mutate(id = 47),
+      subset(m, id == 48)$kdes[[1]] %>% mutate(id = 48),
+      subset(m, id == 50)$kdes[[1]] %>% mutate(id = 50),
+      subset(m, id == 52)$kdes[[1]] %>% mutate(id = 52),
+      subset(m, id == 53)$kdes[[1]] %>% mutate(id = 53)) %>% 
+  mutate(id = as.factor(id)) 
+
+
+
+iso_all = merge(iso_all, bordereau, by = c("id")) %>% 
+  dplyr::select(id, level, what, geometry, SEXE) %>% 
+  rename(Individual = id)
+
+
+
+p2 = ggplot() +
+  geom_raster(data = df_zoom, aes(x = x, y =y),
+              fill = rgb(r = df_zoom$Red,
+                         g = df_zoom$Green,
+                         b = df_zoom$Blue,
+                         maxColorValue = 255)) +
+  scale_fill_identity() +
+  geom_sf(data = iso_all, aes(color = Individual),
+          fill = NA, linewidth = 1, alpha = 0.9) +
+  scale_color_brewer(name = "Individual", palette = "Spectral") +
+  xlab(NULL) +
+  ylab(NULL) +
+  theme_bw() +
+  scalebar(iso_all, dist = 10, dist_unit = "km",
+           transform = FALSE, model = "WGS84", st.size = 3.5) +
+  north(iso_all)+
+  geom_sf(data = colony,
+          color = "yellow", size = 5, alpha = 1, shape = 18)
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.cap ="Minimum home ranges estimated at 95% by Kernel Density (KDE) method for ten Agami Herons (Agamia agami) in Kaw-Roura Marsh National Nature Reserve (French Guiana). The colony is represented by the yellow square"}
+p2
+
+```
+
+

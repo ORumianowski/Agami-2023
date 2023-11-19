@@ -1,0 +1,573 @@
+---
+title: "Resultat"
+author: "RUMIANOWSKI 0."
+date: "18/06/2022"
+output:
+  pdf_document: null
+  word_document: default
+encoding: "UTF-8"
+---
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# Load packages ----
+library(tidyverse)
+library(mvtnorm)
+library(amt)
+library(purrr)
+library(lubridate)
+library(sf)
+library(terra)
+library(broom)
+library(here)    
+library(prismatic)
+library(readxl)
+library(kableExtra)
+library(track2KBA)
+library(ggpubr)
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# 1. Load data ----
+
+# data agami
+dagami_42 = read.csv('data/X42.csv',sep=';', dec = ",") %>% 
+  mutate( id = "42")
+dagami_43 =read.csv('data/X43.csv',sep=';', dec = ",") %>% 
+  mutate( id = "43")
+dagami_44 =read.csv('data/X44.csv',sep=';', dec = ",") %>% 
+  mutate( id = "44")
+dagami_45 =read.csv('data/X45.csv',sep=';', dec = ",") %>% 
+  mutate( id = "45")
+dagami_46 =read.csv('data/X46.csv',sep=';', dec = ",") %>% 
+  mutate( id = "46")
+dagami_47 =read.csv('data/X47.csv',sep=';', dec = ",") %>% 
+  mutate( id = "47")
+dagami_48 =read.csv('data/X48.csv',sep=';', dec = ",") %>% 
+  mutate( id = "48")
+dagami_50 =read.csv('data/X50.csv',sep=';', dec = ",") %>% 
+  mutate( id = "50")
+dagami_52 =read.csv('data/X52.csv',sep=';', dec = ",") %>% 
+  mutate( id = "52")
+dagami_53 =read.csv('data/X53.csv',sep=';', dec = ",") %>% 
+  mutate( id = "53")
+
+dagami = rbind(dagami_42, 
+               dagami_43, 
+               dagami_44, 
+               dagami_45, 
+               dagami_46, 
+               dagami_47, 
+               dagami_48, 
+               dagami_50, 
+               dagami_52,
+               dagami_53) %>% 
+  subset(., Date != "10/05/2023") # pre deployment test day
+
+# coordonnees de la colonie
+colony <- tibble(
+  Longitude = -52.158637, 
+  Latitude  = 4.644658 )%>% 
+  st_as_sf(.,coords = c("Longitude","Latitude"), crs = 4326) %>% 
+  st_transform(., crs = 2971)
+
+# rayon estime de la colonie
+colony_radius = 1000 # unit: meter
+
+bordereau <- read_excel("data/bordereau.xlsx")
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# formatage
+dagami  = dagami %>% 
+  mutate(ts = dmy_hms(paste(dagami$Date, dagami$Time))) %>% 
+  mutate(ts = ts - hms("03:00:00")) %>% 
+  rename(x_ = Longitude, y_ = Latitude) %>% 
+  subset(., CRC == "OK") %>% 
+  dplyr::select(id, x_, y_, ts, Fix) 
+
+dagami  = dagami %>% 
+  st_as_sf(.,coords = c("x_","y_"), crs = 4326) %>% 
+  st_transform(., crs = 2971) %>% 
+  mutate(dist_colony = st_distance(., colony))%>% 
+  mutate(x_ = st_coordinates(.)[, "X"],
+         y_ = st_coordinates(.)[, "Y"]) %>%
+  st_drop_geometry() %>% 
+  mutate(dist_colony = as.numeric(dist_colony))
+
+nb_valid_gps_position = nrow(dagami)
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+# SUIVI -------------------------------------------------------------------
+
+
+suivi = dagami %>% 
+  nest(data = -c(id)) %>% 
+  mutate(min = map(data, ~ .x %>% pull(ts) %>% min())) %>% 
+  mutate(max = map(data, ~ .x %>% pull(ts) %>% max())) %>% 
+  unnest(cols = c(min, max)) %>% 
+  mutate(duration = as.numeric(max - min) %>% round(., digits = 2)) %>% 
+  dplyr::select(id, duration) %>% 
+  mutate(fixes = table(dagami$id) %>% as.integer())
+
+suivi2 = merge(suivi, bordereau, by = c("id")) %>% 
+  rename(date_equip = Date) %>% 
+  dplyr::select(id, SEXE, duration, fixes, date_equip) 
+
+
+colnames(suivi2) = c("ID No.", "Sex", "Duration (day)",  "Fixes",
+                     "Date of Equipment")
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+trk <- dagami %>% 
+  make_track(x_, y_, ts,
+             id = id, Fix = Fix,
+             crs = 2971) %>% 
+  tracked_from_to(from = as.POSIXct("2023-05-19 20:00"),
+                  to = as.POSIXct("2024-10-01 08:00"))
+
+
+dat1 <- trk %>% nest(data = -id)
+
+dat2 <- dat1 %>% 
+  mutate(dat.resample = map(data, ~ track_resample(., rate = minutes(60), tolerance = minutes(10)))) %>% 
+  mutate(ssf = map(dat.resample, ~ .x %>% steps_by_burst())) 
+
+dat.ssf2 <- dat2 %>% dplyr::select(ssf, id) %>% unnest(cols = ssf) %>% 
+  mutate(log_sl_ = log(sl_), sin_ta_ = sin(ta_))
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+nb_valid_step = nrow(dat.ssf2)
+```
+
+## Résultats
+
+Sur les 12 adultes équipés, 10 ont fourni des données pour l'ensemble de la période de suivi de la reproduction. Deux individus n'ont fourni aucune donnée. Nous avons obtenu un total de `r nb_valid_gps_position` coordonnées GPS. Après filtrage des pas avec un rééchantillonnage d'un point toutes les 60 minutes avec une tolérance de 10 minutes, nous avons obtenu `r nb_valid_step` pas valides pour les analyses.
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+suivi2 %>% 
+  kbl(., booktabs = T, caption = "Information on the ten tracked ten Agami Herons (Agamia agami) in Kaw-Roura Marsh National Nature Reserve (French Guiana).") %>%
+  kable_paper(latex_options = c("striped", "hold_position"), full_width = F) 
+```
+
+### Rythme d'activité 
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+trk <- dagami %>% 
+  make_track(x_, y_, ts,
+             id = id, Fix = Fix,
+             crs = 2971) %>% 
+  tracked_from_to(from = as.POSIXct("2023-05-19 20:00"),
+                  to = as.POSIXct("2024-10-01 08:00"))
+
+
+dat1 <- trk %>% nest(data = -id)
+
+dat2 <- dat1 %>% 
+  mutate(dat.resample = map(data, ~ track_resample(., rate = minutes(60), tolerance = minutes(10))))
+
+dat.ssf <- dat2 %>% 
+  mutate(ssf = map(dat.resample, ~ .x %>% steps_by_burst())) 
+
+dat.ssf2 <- dat.ssf %>% dplyr::select(ssf, id) %>% unnest(cols = ssf) %>% 
+  mutate(log_sl_ = log(sl_), sin_ta_ = sin(ta_))
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+min_dt = dat.ssf2$dt_ %>% min() %>% round(., digits = 0)
+max_dt = dat.ssf2$dt_ %>% max() %>% round(., digits = 0)
+
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+dat.ssf2$day_night = dat.ssf2$t1_ %>% 
+  hour() %>% 
+  cut(.,
+      breaks=c(0, 6.25, 18.75, 24),
+      labels=c('Night', 'Day','Night'))
+
+mod <- lm(sl_ ~ day_night, data = dat.ssf2)
+
+```
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+mean_night = mod$coefficients[[1]] %>% round(., digits = 0)
+
+mean_day = (mod$coefficients[[1]] %>% round(., digits = 0) + mod$coefficients[[2]]) %>% round(., digits = 0)
+
+```
+
+
+
+La longueur moyenne des pas effectués à chaque heure de la journée a été calculée à partir des données de la journée entière (Fig.1). L'heure utilisée est la troncature de l'heure qui initie le pas. La durée des pas est comprise entre `r min_dt` et `r max_dt` minutes. Les valeurs obtenues montrent une différence significative entre les heures nocturnes et les heures diurnes (GLMM, P < 0,001). La distance moyenne parcourue par heure pendant la journée est de `r mean_day` m et de `r mean_night` m pendant la nuit. De plus, la nuit, la distance parcourue semble augmenter progressivement à partir de 20:00, avant de diminuer brutalement à la dernière heure de la nuit 5:00. Les pas ont été catégorisés selon leur longueur : de 0 à 15m, de 15 à 200m, de 200 à 1000m et de plus de 1000m. Pour chaque heure de la journée, la proportion de chaque catégorie de pas a été calculé (Fig.2). Les déplacements de plus de 1000m sont exclusivement effectués la nuit. Les déplacements de 15 à 200m sont plus nombreux en journée. Les périodes d’immobilité sont plus fréquentes de nuit. Les pas qui rentrent et sortent de la colonie ont été identifiés (Fig.3). Trois des cinq pas arrivant à la colonie s’effectuent entre 21h et 23h. L’ensemble des 13 pas partant de la colonie s’effectue après minuit dont six à 5:00.
+
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+n_sl = c()
+mean_sl = c()
+sd_sl = c()
+lower_sl = c()
+upper_sl = c()
+
+
+for (h in 0:23){
+  
+  sl_h = dat.ssf2 %>% subset(.,hour(t1_) == h) %>% pull(sl_) 
+  
+  n_sl_h = length(sl_h)
+  mean_sl_h = mean(sl_h)
+  sd_sl_h = sd(sl_h)
+  lower_sl_h = t.test(sl_h)["conf.int"][[1]][1]
+  upper_sl_h = t.test(sl_h)["conf.int"][[1]][2]
+    
+    n_sl = c(n_sl, n_sl_h)
+    mean_sl = c(mean_sl, mean_sl_h)
+    sd_sl = c(sd_sl, sd_sl_h)
+    lower_sl = c(lower_sl, lower_sl_h)
+    upper_sl = c(upper_sl, upper_sl_h)}
+
+
+df = tibble(time = 0:23) %>% 
+  mutate(N = n_sl,
+         Mean = mean_sl,
+         SD = sd_sl,
+         Lower95 = lower_sl,
+         Upper95 = upper_sl
+         )
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+p1 = ggplot() + 
+  geom_rect(data = df, aes(xmin = 0, xmax = 0, ymin = -Inf, ymax = Inf))+
+  geom_rect(aes(xmin = 18.5, xmax = 23, ymin = -Inf, ymax = Inf, alpha = 0.1))+
+  geom_rect(aes(xmin = 0, xmax = 5.5, ymin = -Inf, ymax = Inf, alpha = 0.1))+
+  geom_pointrange(data = df, aes(time, Mean, ymin = Lower95, ymax = Upper95), size = 0.2)+
+  geom_vline(xintercept = c(5.5, 18.5), linetype="dashed", 
+             linewidth=0.8)+
+  xlab("Time (hour)") + ylab("Mean step length (m)") +
+  xlim(0, 23)+
+  theme(legend.position='none')
+
+```
+
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+trk <- dagami %>% 
+  make_track(x_, y_, ts,
+             id = id, Fix = Fix,
+             crs = 2971) %>% 
+  tracked_from_to(from = as.POSIXct("2023-05-19 20:00"),
+                  to = as.POSIXct("2024-10-01 08:00"))
+
+
+dat1 <- trk %>% nest(data = -id)
+dat2 <- dat1 %>% 
+  mutate(dat.resample = map(data, ~ track_resample(., rate = minutes(60), 
+                                                   tolerance = minutes(10))))%>% 
+  mutate(ssf = map(dat.resample, ~ .x %>% steps_by_burst())) %>% 
+  dplyr::select(ssf, id) %>% unnest(cols = ssf) %>% 
+  filter(sl_ > 0) %>% 
+  na.omit(., cols=c("x2_","y2_")) %>% 
+  st_as_sf(.,coords = c("x2_","y2_"), crs = 2971) %>% 
+  mutate(dist_colony = st_distance(., colony) %>% 
+           as.numeric())%>% 
+  mutate(x1_ = st_coordinates(.)[, "X"],
+         y1_ = st_coordinates(.)[, "Y"]) %>% 
+  st_drop_geometry() %>% 
+  subset(dist_colony > 0) %>%
+  subset(dist_colony < Inf) %>%
+  mutate(presence_colony = dist_colony < colony_radius)
+
+
+
+trk = dat2 %>% 
+  na.omit()
+
+trk$sl_cat = trk$sl_ %>% 
+  cut(.,
+      breaks=c(0, 15, 200, 1000, 10000000),
+      labels=c('Noise', 'Short','Medium', 'long')) %>% 
+  as.factor()
+
+levels(trk$sl_cat) = c('0-15', '15-200','200-1000', '1000+')
+
+library(gcookbook) # Load gcookbook for the cabbage_exp data set
+
+trk  = trk %>% rename(Category = sl_cat)
+
+p2 = ggplot(trk, aes(x = hour(t1_), y = length(Category), fill = Category)) +
+  geom_col(position = "fill") +
+  ylab("Category") +
+  xlab("Hour") +
+  scale_fill_brewer(palette="Greys", direction=-1)
+
+```
+
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+trk5 <- dagami %>% 
+  make_track(x_, y_, ts,
+             id = id, Fix = Fix,
+             crs = 2971) %>% 
+  tracked_from_to(from = as.POSIXct("2023-05-19 20:00"),
+                  to = as.POSIXct("2024-10-01 08:00")) 
+
+dat1 <- trk5 %>% 
+  nest(data = -id)
+
+dat2 <- dat1 %>% 
+  mutate(dat.resample = map(data, ~ track_resample(., rate = minutes(60), 
+                                                   tolerance = minutes(10))))%>% 
+  mutate(ssf = map(dat.resample, ~ .x %>% steps_by_burst())) %>% 
+  dplyr::select(ssf, id) %>% unnest(cols = ssf) %>% 
+  filter(sl_ > 0) %>% 
+  na.omit(., cols=c("x2_","y2_")) %>% 
+  st_as_sf(.,coords = c("x2_","y2_"), crs = 2971) %>% 
+  mutate(dist_colony = st_distance(., colony) %>% 
+           as.numeric())%>% 
+  mutate(x2_ = st_coordinates(.)[, "X"],
+         y2_ = st_coordinates(.)[, "Y"]) %>% 
+  st_drop_geometry() %>% 
+  subset(dist_colony > 0) %>%
+  subset(dist_colony < Inf) %>%
+  mutate(presence_colony2 = dist_colony < colony_radius)
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+dat3 <- dat2 %>% 
+  st_as_sf(.,coords = c("x1_","y1_"), crs = 2971) %>% 
+  mutate(dist_colony1 = st_distance(., colony) %>% 
+           as.numeric())%>% 
+  mutate(x1_ = st_coordinates(.)[, "X"],
+         y1_ = st_coordinates(.)[, "Y"]) %>% 
+  st_drop_geometry() %>%
+  mutate(presence_colony1 = dist_colony1 < colony_radius) %>% 
+  mutate(tranzit_vers_colony = !presence_colony1 & presence_colony2)%>% 
+  mutate(tranzit_vers_ext = presence_colony1 & !presence_colony2)%>% 
+  mutate(tranzit = presence_colony1 != presence_colony2) %>% 
+  mutate(hour = as.integer(hour(t1_)))
+
+
+
+dat4 = dat3  %>% 
+  mutate(TRANZITcat = case_when((!presence_colony1 & presence_colony2) ~ "tranzit_vers_colony",
+                                  (presence_colony1 & !presence_colony2) ~ "tranzit_vers_ext",
+                                  TRUE ~ "no_transit"))
+
+a1 = dat4 %>% aggregate(tranzit_vers_colony ~ hour, data = ., sum) %>% 
+  mutate(nature_tranzit = "toward the colony") %>% 
+  rename(count = tranzit_vers_colony)
+a2 = dat4 %>% aggregate(tranzit_vers_ext ~ hour, data = ., sum) %>% 
+  mutate(nature_tranzit = "outward of the colony") %>% 
+  rename(count = tranzit_vers_ext)
+
+res_tranz = rbind(a1, a2) %>% 
+  rename( Mouvement = nature_tranzit)
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+res_tranz = res_tranz 
+
+p3 = ggplot() +
+  geom_bar(data=res_tranz, aes(x=hour, y=count, fill=Mouvement),
+                                stat="identity", position=position_dodge()) +
+  xlab("Time (hour)") + 
+  ylab("Count")+ 
+  theme(legend.position = c(0.7, 0.7))
+
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE, fig.cap="(A) Distribution of the step length in relation of the hour of the day. Distances were categorized into four groups: from 0 to 15m, from 15 to 200m, from 200 to 1000m and over 1000m. The first category of 0-15 m steps includes periods of potential immobility. (B) Mean step length in relation of the hour of the day. The dashed vertical lines indicate day and night times to local sunrise and sunset times (sunrise: 06:15, sunset: 18:45). (C) Distribution of occurrences of outward and return movements to the colony in relation of the hour of the day."}
+
+figure = ggarrange(
+  p2,
+  ggarrange(p1, p3, ncol = 2, labels = c("B", "C"), vjust = -0.1), 
+  nrow = 2, 
+  labels = "A",
+  vjust = 2
+  )
+
+figure
+
+```
+
+
+### Caractéristiques des pêches
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+dagami_KBA = rbind(dagami_42, 
+               dagami_43, 
+               dagami_44, 
+               dagami_45, 
+               dagami_46, 
+               dagami_47, 
+               dagami_48, 
+               dagami_50, 
+               dagami_52,
+               dagami_53) %>% 
+  subset(., Date != "10/05/2023")
+
+dagami_KBA$ts = paste(dagami_KBA$Date, dagami_KBA$Time) %>%
+  dmy_hms()
+
+dagami_KBA$ts = dagami_KBA$ts - hms("03:00:00")
+
+dagami_KBA = dagami_KBA %>% 
+  subset(., CRC == "OK") %>% 
+  rename(x_ = Longitude,
+         y_ = Latitude)
+
+dataGroup <- formatFields(
+  dataGroup = dagami_KBA, 
+  fieldID   = "id", 
+  fieldDateTime = "ts",
+  fieldLon  = "x_", 
+  fieldLat  = "y_"
+)
+
+
+colony <- dataGroup %>% 
+  summarise(
+    Longitude = -52.158637, 
+    Latitude  = 4.644658
+  )
+
+
+trips <- tripSplit(
+  dataGroup  = dataGroup,
+  colony     = colony,
+  innerBuff  = 1,      # kilometers
+  returnBuff = 3,
+  duration   = 0.5,      # hours
+  rmNonTrip  = TRUE
+)
+
+
+trips <- subset(trips, trips$Returns == "Yes" )
+
+sumTrips <- tripSummary(trips = trips, colony = colony)
+
+res = sumTrips %>% 
+  dplyr::select(ID, duration, max_dist, n_locs) %>% 
+  mutate(duration = duration%>% round(digits = 1))%>% 
+  mutate(max_dist = max_dist%>% round(digits = 1)) %>% 
+  mutate(n_locs = n_locs %>% floor() %>% as.character()) 
+
+
+res = rbind(res,
+            tibble( ID = "Median",
+                    duration = median(res$duration)%>% round(., digits = 1),
+                    max_dist = median(res$max_dist)%>% round(., digits = 1), 
+                    n_locs = ""))
+
+
+colnames(res) = c("ID No.", "Duration (hour)", "Dist.Max (km)", "Fixes")
+
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+#les max
+
+min_duration = res$`Duration (hour)` %>% min() %>% round(., digits = 1)
+max_duration = res$`Duration (hour)` %>% max() %>% round(., digits = 1)
+med_duration = res[res$`ID No.` == "Median", c("Duration (hour)")] %>% max() %>% round(., digits = 1)
+med_dist = res[res$`ID No.` == "Median", c("Dist.Max (km)")]  %>% max() %>% round(., digits = 1)
+max_dist = res$`Dist.Max (km)` %>% max() %>% round(., digits = 1)
+
+```
+
+Sur l'ensemble des déplacements effectués, 9 étaient complet, un déplacement complet étant un ensemble de positions commençant à la colonie et se terminant à la colonie (Tab.2). Ces déplacements complets ont été effectués par 4 adultes (ID = 42 , 45, 46, 52). Ces derniers ont alors été identifiés comme reproducteur actif. La durée de ces déplacements varie de `r min_duration` heures à `r max_duration` heures, avec une médiane de `r med_duration` heures. La distance maximale médiane atteinte par ces voyages est de `r med_dist` km. La position la plus éloignée d'une chasse entièrement suivie est de `r max_dist` km. 
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+
+res %>% 
+  kbl(., booktabs = T, caption = "Duration and maximum distance of complete foraging trips. A complete foraging trip is defined as a set of positions starting at the colony and ending at the colony.") %>%
+  kable_paper(latex_options = c("striped", "hold_position"), full_width = F) 
+
+```
+
+### Tailles des domaines vitaux
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+trk <- dagami %>% 
+  make_track(x_, y_, ts,
+             id = id,
+             crs = 2971) %>% 
+  tracked_from_to(from = as.POSIXct("2023-05-19 20:00"),
+                  to = as.POSIXct("2024-10-01 08:00"))
+
+# nest --------------------------------------------------------------------
+
+dat2 <- trk |> nest(data = -c(id)) |> 
+  mutate(
+    data = map(data, ~ track_resample(.x, rate = hours(1), tolerance = minutes(5))), 
+    n = map_int(data, nrow)) |> 
+  mutate(
+    hr.akde= map(data, hr_akde),
+    hr.kde95 = map(data, hr_kde, levels = 0.95),
+    hr.kde50 = map(data, hr_kde, levels = 0.50)
+  )
+
+dat3 <- dat2 |> 
+  pivot_longer(hr.kde95, names_to = "estimator", values_to = "hr") %>% 
+  mutate(hr.kde95 = map_dbl(hr, ~ round(as.numeric(hr_area(.x)$area)/1000000, digits = 1))) %>% 
+  dplyr::select(hr.kde95, n)
+
+dat5 <- dat2 |> 
+  pivot_longer(hr.kde50, names_to = "estimator", values_to = "hr") %>% 
+  mutate(hr.kde50 = map_dbl(hr, ~ round(as.numeric(hr_area(.x)$area)/1000000, digits = 1))) %>% 
+  dplyr::select(hr.kde50)
+
+dat4  = dat2 %>% 
+  pivot_longer(hr.akde, names_to = "estimator", values_to = "hr") %>% 
+  mutate(hr_akde_inf = map_dbl(hr, ~ round(as.numeric(hr_area(.x)$area[1])/1000000, digits = 1)),
+         hr_akde_est = map_dbl(hr, ~ round(as.numeric(hr_area(.x)$area[2])/1000000, digits = 1)),
+         hr_akde_sup = map_dbl(hr, ~ round(as.numeric(hr_area(.x)$area[3])/1000000, digits = 1)))%>%
+  dplyr::select(id, hr_akde_inf, hr_akde_est, hr_akde_sup) %>% 
+  mutate(hr_akde_inf = hr_akde_inf,
+         hr_akde_sup = hr_akde_sup)
+```
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE}
+res_kde = cbind(dat5, dat4, dat3, paste0("[", dat4$hr_akde_inf, "-", dat4$hr_akde_sup, "]"))
+
+colnames(res_kde) = c("KDE50", "ID No.",  "hr_akde_inf", "hr_akde_est","hr_akde_sup", "95% KDE (km2)", "Fixes", "95% aKDE (km2)" )
+res_kde = res_kde %>% 
+  dplyr::select(`ID No.`, KDE50, `95% KDE (km2)`, hr_akde_est, `95% aKDE (km2)`, Fixes)
+
+colnames(res_kde) = c("ID No.", "50% KDE (km\u00B2)",  "95% KDE (km\u00B2)", "95% aKDE (km\u00B2)", "CI 95% aKDE (km\u00B2)\u00B9", "Fixes")
+
+```
+ 
+ Les KDE minimum sont représentés dans le graphique X. Les valeurs de KDE et aKDE sont reportées dans le tableau 3.
+
+
+```{r, echo = FALSE, warning = FALSE, message = FALSE,}
+res_kde %>% 
+  kbl(., booktabs = T, caption = "Minimum home ranges estimated at 95% by Kernel Density Estimate (KDE) and autocorrelated Kernel Density Estimate (aKDE) method for ten Agami Herons (Agamia agami) in Kaw-Roura Marsh National Nature Reserve (French Guiana).") %>%
+  kable_paper(latex_options = c("striped"), full_width = F)  %>%
+  footnote(number = c("aKDE values are given with a 95% confidence interval"))
+```
